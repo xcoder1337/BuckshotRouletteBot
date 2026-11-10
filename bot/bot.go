@@ -538,6 +538,13 @@ func (b *Bot) handleCallback(cb *tgbotapi.CallbackQuery) {
 		b.api.Request(callback)
 		b.handleStart(cb.Message)
 		return
+
+	default:
+		// Неизвестный callback — обычно кнопка из старого сообщения или из
+		// прежней версии клавиатуры. Если не ответить, у нажавшего навсегда
+		// остаются «часики» на кнопке и он думает, что бот завис.
+		callback.Text = "⌛ Кнопка устарела — открой свежее сообщение"
+		b.api.Request(callback)
 	}
 }
 
@@ -759,21 +766,24 @@ func (b *Bot) callbackUseItem(cb *tgbotapi.CallbackQuery, itemID int) {
 		b.sendToAllPlayers(g, result)
 		b.sendGameOver(g)
 	} else {
-		// Результат предмета видит только игрок (лупа, телефон) или оба
-		needPrivate := false
-		// Лупа и телефон — приватно
-		if strings.Contains(result, "🔍") || strings.Contains(result, "📱") {
-			needPrivate = true
-		}
+		// В оригинале противник всегда видит, ЧТО использовано, и не видит
+		// только результат лупы и телефона. Раньше приватность определялась по
+		// тексту результата (strings.Contains "🔍"/"📱"), а противнику уходило
+		// «использовал предмет...» — по факту он не знал даже, какой предмет.
+		used := game.Item{Type: g.LastItemUsed}
 
-		if needPrivate {
-			// Приватно текущему игроку
-			msg := tgbotapi.NewMessage(cb.Message.Chat.ID, "🤫 "+result)
+		if used.IsPrivate() {
+			// Результат — только применившему, и строго в личку: в игре из
+			// группового чата cb.Message.Chat.ID — это группа, и приватный
+			// результат утекал противнику.
+			msg := tgbotapi.NewMessage(cb.From.ID, "🤫 "+result)
 			b.api.Send(msg)
-			// Остальным — просто факт использования
+
+			// Противнику — факт применения с названием предмета, без результата.
 			opponent := g.OpponentPlayer()
 			opMsg := tgbotapi.NewMessage(opponent.TelegramID,
-				fmt.Sprintf("🔮 %s использовал предмет...", g.CurrentPlayer().DisplayName))
+				fmt.Sprintf("🔮 %s использовал %s — что он увидел, знает только он",
+					g.CurrentPlayer().DisplayName, used.Name()))
 			b.api.Send(opMsg)
 		} else {
 			b.sendToAllPlayers(g, result)

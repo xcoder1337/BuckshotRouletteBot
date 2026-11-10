@@ -3,6 +3,7 @@ package game
 import (
 	"fmt"
 	"math/rand"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -48,7 +49,12 @@ type Player struct {
 	MaxHP        int
 	Items        []Item
 	Handcuffed   bool // наручники — пропуск хода
-	SkipNextTurn bool // второй ход наручников
+
+	// Личное знание игрока о патронах. Раньше это лежало в Game одним слотом
+	// на всю игру: второй игрок своим 🔍/📱 затирал знание первого, а ИИ-дилер
+	// читал чужую разведку. Теперь знание строго приватно и копится.
+	KnownShell *ShellType        // 🔍: что в стволе сейчас
+	PhoneKnown map[int]ShellType // 📱: раскрытые позиции обоймы (1-based), 1 — патрон в стволе
 }
 
 func (p *Player) IsAlive() bool {
@@ -121,23 +127,27 @@ type Game struct {
 	// в статусе (сколько осталось из всех), без раскрытия 🔴/🔵.
 	RoundShells int
 
-	// Состояние текущего хода
-	KnownShell    *ShellType // Известный патрон (лупа)
-	PhoneShell    *ShellType // Раскрытый телефоном патрон (nil — нет данных)
-	PhoneShellPos int        // Позиция раскрытого патрона в обойме (1-based), 0 — нет данных
+	// RoundLive/RoundBlank — состав обоймы на момент зарядки. В оригинале
+	// патроны выкладывают на стол, когда заряжают, — состав видит каждый;
+	// неизвестно только, какой из них сейчас в стволе. После первых выстрелов
+	// Shotgun.Magazine пустеет, и восстановить исходный состав уже нельзя,
+	// поэтому он хранится здесь, а статус показывает его строкой «🔫 Заряжено».
+	RoundLive  int
+	RoundBlank int
 
-	// TelegramID игрока, которому известна эта информация. В оригинале лупа
-	// и телефон показывают результат ТОЛЬКО использовавшему: соперник не должен
-	// видеть «в стволе 🔴» или «патрон #2 🔵» в чужом статусе. 0 — никто.
-	KnownShellOwner int64
-	PhoneInfoOwner  int64
+	// Состояние текущего хода. Разведка о патронах живёт в Player (KnownShell,
+	// PhoneKnown) — она приватна для каждого игрока.
 
 	SawedOff      bool       // Ножовка активна
 	HandcuffsUsed bool       // Наручники использованы в этом ходу
 
+	// LastItemUsed — предмет, применённый последним вызовом UseItem. Нужен
+	// боту, чтобы показать противнику, ЧТО было использовано (факт применения
+	// в оригинале виден), скрыв только результат лупы/телефона.
+	LastItemUsed ItemType
+
 	// Для адреналина
 	AdrenalineActive bool
-	AdrenalineTarget PlayerID
 
 	Log []GameLog
 
@@ -221,9 +231,12 @@ func (g *Game) loadNewRound() {
 
 	g.Shotgun = NewShotgun(minShells, maxShells)
 	g.RoundShells = len(g.Shotgun.Magazine)
+	// Магазин ещё полный — здесь и запоминаем исходный состав раунда.
+	g.RoundLive = g.Shotgun.LiveCount()
+	g.RoundBlank = g.Shotgun.BlankCount()
 
 	g.addLog(fmt.Sprintf("🔫 Обойма заряжена: %d🔴 боевых, %d🔵 холостых",
-		g.Shotgun.LiveCount(), g.Shotgun.BlankCount()))
+		g.RoundLive, g.RoundBlank))
 
 	// Раздаём предметы (как в оригинале: 4 в 1-м раунде, +1 каждый раунд, максимум 8).
 	// В оригинале предметы между раундами НЕ переносятся — выдаём свежий набор.
@@ -240,11 +253,7 @@ func (g *Game) loadNewRound() {
 	}
 
 	// Сброс состояний
-	g.KnownShell = nil
-	g.KnownShellOwner = 0
-	g.PhoneShell = nil
-	g.PhoneShellPos = 0
-	g.PhoneInfoOwner = 0
+	g.resetShellKnowledge()
 	g.SawedOff = false
 	g.Shotgun.SawedOff = false
 	g.HandcuffsUsed = false
@@ -252,7 +261,6 @@ func (g *Game) loadNewRound() {
 
 	for _, p := range g.Players {
 		p.Handcuffed = false
-		p.SkipNextTurn = false
 	}
 }
 
@@ -332,6 +340,7 @@ func (g *Game) UseItem(playerID int64, itemID int) (string, error) {
 
 		g.AdrenalineActive = false
 		g.Phase = PhasePlaying
+		g.LastItemUsed = stolen.Type
 
 		msg := fmt.Sprintf("%s украл у %s: %s", currentPlayer.DisplayName, owner.DisplayName, stolen.Name())
 		g.addLog(msg)
@@ -345,6 +354,7 @@ func (g *Game) UseItem(playerID int64, itemID int) (string, error) {
 		// Отмены в игре нет, но и сгорать предмету впустую нельзя.
 		return result, err
 	}
+	g.LastItemUsed = item.Type
 
 	// Убираем предмет у владельца
 	owner.RemoveItem(item.ID)
@@ -366,6 +376,108 @@ func (g *Game) hasStealableItem(p *Player) bool {
 	return false
 }
 
+// pickPhoneShell — какой патрон покажет телефон игроку p.
+// Порядок предпочтений: (1) позиции, о которых игрок ещё не знает, кроме
+// текущей — для неё есть лупа; (2) любая неизвестная позиция, включая текущую
+// (если о будущих игрок уже всё знает, повторять то же самое бессмысленно);
+// (3) если игрок знает всю обойму — любая, кроме текущей.
+// Благодаря (1) и (2) телефон никогда не выдаёт одну и ту же строку дважды,
+// пока в обойме остаётся что-то неизвестное.
+func (g *Game) pickPhoneShell(p *Player) (int, ShellType) {
+	mag := g.Shotgun.Magazine
+	var unknownFuture, unknownAny, future []int
+	for pos := 1; pos <= len(mag); pos++ {
+		_, known := p.PhoneKnown[pos]
+		switch {
+		case !known && pos > 1:
+			unknownFuture = append(unknownFuture, pos)
+			unknownAny = append(unknownAny, pos)
+		case !known:
+			unknownAny = append(unknownAny, pos)
+		case pos > 1:
+			future = append(future, pos)
+		}
+	}
+
+	pool := unknownFuture
+	if len(pool) == 0 {
+		pool = unknownAny
+	}
+	if len(pool) == 0 {
+		pool = future
+	}
+	if len(pool) == 0 {
+		return 0, ShellBlank
+	}
+
+	pos := pool[rand.Intn(len(pool))]
+	return pos, mag[pos-1]
+}
+
+// rememberPhoneShell — запомнить раскрытую телефоном позицию.
+func (p *Player) rememberPhoneShell(pos int, shell ShellType) {
+	if pos <= 0 {
+		return
+	}
+	if p.PhoneKnown == nil {
+		p.PhoneKnown = make(map[int]ShellType, 4)
+	}
+	p.PhoneKnown[pos] = shell
+}
+
+// knownPhoneText — что игрок знает об обойме по телефонам, по возрастанию
+// позиции. Позиции нумеруются от патрона в стволе (#1).
+func (p *Player) knownPhoneText() string {
+	if len(p.PhoneKnown) == 0 {
+		return ""
+	}
+	positions := make([]int, 0, len(p.PhoneKnown))
+	for pos := range p.PhoneKnown {
+		positions = append(positions, pos)
+	}
+	sort.Ints(positions)
+
+	var sb strings.Builder
+	for _, pos := range positions {
+		sb.WriteString(fmt.Sprintf("📱 #%d: %s\n", pos, p.PhoneKnown[pos].Name()))
+	}
+	return sb.String()
+}
+
+// shiftShellKnowledge — патрон из ствола израсходован (выстрел или пиво):
+// знание лупы сгорает (в стволе теперь другой патрон), а раскрытые телефоном
+// позиции сдвигаются на одну к стволу. Патрон, который был под номером 1,
+// больше не существует — запись о нём удаляется.
+func (g *Game) shiftShellKnowledge() {
+	for _, p := range g.Players {
+		if p == nil {
+			continue
+		}
+		p.KnownShell = nil
+		if len(p.PhoneKnown) == 0 {
+			continue
+		}
+		shifted := make(map[int]ShellType, len(p.PhoneKnown))
+		for pos, shell := range p.PhoneKnown {
+			if pos > 1 {
+				shifted[pos-1] = shell
+			}
+		}
+		p.PhoneKnown = shifted
+	}
+}
+
+// resetShellKnowledge — новая обойма: знать о ней заранее нечего.
+func (g *Game) resetShellKnowledge() {
+	for _, p := range g.Players {
+		if p == nil {
+			continue
+		}
+		p.KnownShell = nil
+		p.PhoneKnown = nil
+	}
+}
+
 // applyItem — применение эффекта предмета. Возвращает сообщение и ошибку.
 // Если err != nil, предмет НЕ тратится: эффект невозможен (сигареты при полном
 // HP, телефон при одном патроне и т.п.). Отмены, как в шахматах, в игре нет,
@@ -378,21 +490,10 @@ func (g *Game) applyItem(itemType ItemType, user *Player, owner *Player, itemID 
 		g.addLog(fmt.Sprintf("%s использовал 🍺: извлечён %s", user.DisplayName, shell.Emoji()))
 
 		// Извлечение патрона «сдвигает» обойму: патрон, который подсмотрел игрок
-		// лупой, ушёл в небытие (в стволе теперь другой), а раскрытый телефоном
-		// патрон стал на позицию ближе к стволу. Иначе игрок действует по
+		// лупой, ушёл в небытие (в стволе теперь другой), а раскрытые телефоном
+		// позиции стали на одну ближе к стволу. Иначе игрок действует по
 		// устаревшей информации — это баг.
-		g.KnownShell = nil
-		g.KnownShellOwner = 0
-		if g.PhoneShell != nil {
-			if g.PhoneShellPos <= 1 {
-				// Раскрытый патрон был текущим — он и извлечён, информация сгорает.
-				g.PhoneShell = nil
-				g.PhoneShellPos = 0
-				g.PhoneInfoOwner = 0
-			} else {
-				g.PhoneShellPos--
-			}
-		}
+		g.shiftShellKnowledge()
 
 		if g.Shotgun.IsEmpty() {
 			g.nextRound()
@@ -414,8 +515,7 @@ func (g *Game) applyItem(itemType ItemType, user *Player, owner *Player, itemID 
 
 	case ItemMagnifyingGlass:
 		shell := g.Shotgun.CurrentShell()
-		g.KnownShell = &shell
-		g.KnownShellOwner = user.TelegramID
+		user.KnownShell = &shell
 		msg := fmt.Sprintf("🔍 Текущий патрон: %s", shell.Name())
 		g.addLog(fmt.Sprintf("%s использовал 🔍", user.DisplayName))
 		return msg, nil
@@ -445,11 +545,12 @@ func (g *Game) applyItem(itemType ItemType, user *Player, owner *Player, itemID 
 		if len(g.Shotgun.Magazine) <= 1 {
 			return "", fmt.Errorf("📱 В обойме только один патрон — используй лупу!")
 		}
-		pos, shell := g.Shotgun.GetRandomShellInfo()
-		g.PhoneShell = &shell
-		g.PhoneShellPos = pos
-		g.PhoneInfoOwner = user.TelegramID
-		msg := g.phoneInfoText()
+		pos, shell := g.pickPhoneShell(user)
+		if pos == 0 {
+			return "", fmt.Errorf("📱 В обойме нечего подсмотреть!")
+		}
+		user.rememberPhoneShell(pos, shell)
+		msg := fmt.Sprintf("📱 Патрон #%d: %s", pos, shell.Name())
 		g.addLog(fmt.Sprintf("%s использовал 📱", user.DisplayName))
 		return msg, nil
 
@@ -460,13 +561,20 @@ func (g *Game) applyItem(itemType ItemType, user *Player, owner *Player, itemID 
 		// что патрон в стволе сменился на противоположный. Кто видел патрон
 		// лупой — сам догадается, во что он превратился (KnownShellOwner тот же).
 		msg := "🔄 Инвертер! Текущий патрон сменился на противоположный."
-		if g.KnownShell != nil {
-			g.KnownShell = &newShell
-		}
-		// Если телефон раскрыл именно текущий патрон (позиция 1), инвертер его
-		// сменил — обновляем и телефон, иначе игрок увидит устаревший тип.
-		if g.PhoneShell != nil && g.PhoneShellPos == 1 {
-			g.PhoneShell = &newShell
+		// Знание игроков о текущем патроне (лупа или телефон по позиции #1)
+		// обновляем: патрон сменился на противоположный, но кто его видел —
+		// по-прежнему знает, что теперь в стволе.
+		for _, p := range g.Players {
+			if p == nil {
+				continue
+			}
+			if p.KnownShell != nil {
+				flipped := newShell
+				p.KnownShell = &flipped
+			}
+			if _, ok := p.PhoneKnown[1]; ok {
+				p.PhoneKnown[1] = newShell
+			}
 		}
 		g.addLog(fmt.Sprintf("%s использовал 🔄", user.DisplayName))
 		return msg, nil
@@ -508,7 +616,6 @@ func (g *Game) applyItem(itemType ItemType, user *Player, owner *Player, itemID 
 		// просто включаем фазу кражи. Отмены нет: раз нажал — кради.
 		opponent := g.OpponentPlayer()
 		g.AdrenalineActive = true
-		g.AdrenalineTarget = g.CurrentTurn.Other()
 		g.Phase = PhaseAdrenaline
 		msg := fmt.Sprintf("💉 Адреналин! Выбери предмет %s для кражи:", opponent.DisplayName)
 		g.addLog(fmt.Sprintf("%s использовал 💉", user.DisplayName))
@@ -583,14 +690,12 @@ func (g *Game) Shoot(playerID int64, shootSelf bool) (string, error) {
 		}
 	}
 
-	// Сброс ножовки
+	// Сброс ножовки. Знание о патронах не сбрасывается целиком: выстреленный
+	// патрон ушёл, но раскрытые телефоном позиции остаются валидными — они
+	// просто сдвигаются на одну к стволу.
 	g.SawedOff = false
 	g.Shotgun.SawedOff = false
-	g.KnownShell = nil
-	g.KnownShellOwner = 0
-	g.PhoneShell = nil
-	g.PhoneShellPos = 0
-	g.PhoneInfoOwner = 0
+	g.shiftShellKnowledge()
 
 	// Проверка на смерть
 	if !g.Players[0].IsAlive() || !g.Players[1].IsAlive() {
@@ -612,10 +717,12 @@ func (g *Game) Shoot(playerID int64, shootSelf bool) (string, error) {
 		// Раунд переходит: nextRound сам кидает монетку и объявляет первого
 		// игрока. Выше нельзя вызывать nextTurn — иначе он «перевернёт» монетку,
 		// и в логе написано одно («Монетка: A ходит первым!»), а ходит другой.
+		// Состав новой обоймы тут НЕ дублируем: loadNewRound запомнил его
+		// в RoundLive/RoundBlank, и статус сам покажет строку «🔫 Заряжено ...».
+		// Так же ведёт себя обойма, опустевшая от пива, — оба пути дают
+		// одинаковый текст.
 		g.nextRound()
 		result.WriteString("\n📦 Обойма пуста! Новый раунд!")
-		result.WriteString(fmt.Sprintf("\n🔫 Заряжено: %d🔴 боевых, %d🔵 холостых",
-			g.Shotgun.LiveCount(), g.Shotgun.BlankCount()))
 		g.UpdatedAt = time.Now()
 		return result.String(), nil
 	}
@@ -625,15 +732,20 @@ func (g *Game) Shoot(playerID int64, shootSelf bool) (string, error) {
 		// При холостом в себя — ходишь снова
 		// ход не меняется
 	} else {
-		g.nextTurn()
+		// Наручники соперника возвращают приписку «пропускает ход» — она уходит
+		// в общее сообщение о выстреле, чтобы пропуск не был молчаливым.
+		result.WriteString(g.nextTurn())
 	}
 
 	g.UpdatedAt = time.Now()
 	return result.String(), nil
 }
 
-// nextTurn — следующий ход
-func (g *Game) nextTurn() {
+// nextTurn — следующий ход. Возвращает приписку к сообщению о выстреле:
+// пустую строку, когда ход просто перешёл, или строку про пропуск хода по
+// наручникам. Раньше этот пропуск был виден только в логе статуса, и игрок не
+// понимал, почему после его выстрела ход остался у него же.
+func (g *Game) nextTurn() string {
 	nextPlayer := g.CurrentTurn.Other()
 	opponent := g.Players[nextPlayer]
 
@@ -642,10 +754,11 @@ func (g *Game) nextTurn() {
 		opponent.Handcuffed = false
 		g.addLog(fmt.Sprintf("⛓️ %s пропускает ход (наручники)", opponent.DisplayName))
 		// Текущий игрок ходит снова
-		return
+		return fmt.Sprintf("\n⛓️ %s пропускает ход — ходите ещё раз!\n", opponent.DisplayName)
 	}
 
 	g.CurrentTurn = nextPlayer
+	return ""
 }
 
 // nextRound — новый раунд
@@ -687,14 +800,15 @@ func (g *Game) showHPTotals() bool {
 	return g.Round < 3
 }
 
-// phoneInfoText — текстовое представление раскрытого телефоном патрона.
-// Позицию храним структурно (PhoneShellPos), чтобы пиво могло её корректно
-// сдвинуть, и рендерим заново — а не держим устаревшую готовую строку.
-func (g *Game) phoneInfoText() string {
-	if g.PhoneShell == nil || g.PhoneShellPos <= 0 {
-		return ""
+// viewerPlayer — игрок по Telegram ID (nil-safe: пока второй игрок не пришёл,
+// Players[1] == nil).
+func (g *Game) viewerPlayer(telegramID int64) (*Player, bool) {
+	for _, p := range g.Players {
+		if p != nil && p.TelegramID == telegramID {
+			return p, true
+		}
 	}
-	return fmt.Sprintf("📱 Патрон #%d: %s", g.PhoneShellPos, g.PhoneShell.Name())
+	return nil, false
 }
 
 // GetStatusText — текстовый статус игры с точки зрения игрока viewerID.
@@ -715,9 +829,10 @@ func (g *Game) GetStatusText(viewerID int64) string {
 	sb.WriteString("🎯 BUCKSHOT ROULETTE\n")
 	sb.WriteString("━━━━━━━━━━━━━━━━━━━━\n")
 
-	// Состав патронов (🔴/🔵) показывается ОДИН раз в начале раунда (в логе:
-	// «Обойма заряжена: 2🔴 боевых, 2🔵 холостых»), а потом скрывается.
-	// Иначе игроку незачем запоминать и считать выстрелы — это и есть суть.
+	// Состав, который БЫЛ заряжен в этом раунде, виден всегда (строка
+	// «🔫 Заряжено ...» ниже) — как и в оригинале, где патроны выкладывают на
+	// стол при зарядке. Скрыто другое: какой именно патрон сейчас в стволе,
+	// и это приходится считать по выстрелам.
 	sb.WriteString(fmt.Sprintf("📍 Раунд %d\n", g.Round))
 	sb.WriteString("\n")
 
@@ -758,16 +873,17 @@ func (g *Game) GetStatusText(viewerID int64) string {
 		sb.WriteString("\n")
 	}
 
-	// Нейтральный счётчик патронов: сколько осталось из заряженных.
-	// 🔋 = патрон ещё в стволе, 🪫 = уже выстрелян/извлечён.
-	// Не раскрывает 🔴/🔵 — только подсказка, как поддон в оригинале,
-	// чтобы игрок не забывал, сколько всего было и сколько осталось.
+	// Всё общее знание о патронах — одной строкой: состав, который зарядили
+	// (в оригинале его видно на столе), и нейтральный счётчик остатка
+	// (🔋 ещё в стволе, 🪫 выстрелян или извлечён пивом). Какой патрон сейчас
+	// в стволе — строка НЕ раскрывает.
 	if g.RoundShells > 0 {
 		remaining := len(g.Shotgun.Magazine)
 		if remaining > g.RoundShells {
 			remaining = g.RoundShells
 		}
-		sb.WriteString(fmt.Sprintf("🔫 Патроны: %s%s  (%d/%d)\n",
+		sb.WriteString(fmt.Sprintf("🔫 Заряжено %d🔴 %d🔵 • осталось %s%s (%d/%d)\n",
+			g.RoundLive, g.RoundBlank,
 			strings.Repeat("🔋", remaining),
 			strings.Repeat("🪫", g.RoundShells-remaining),
 			remaining, g.RoundShells))
@@ -776,27 +892,21 @@ func (g *Game) GetStatusText(viewerID int64) string {
 	if g.SawedOff {
 		sb.WriteString("🪚 Ствол укорочен — следующий выстрел 2x урон!\n")
 	}
-	// Лупа и телефон — приватная информация ТОЛЬКО использовавшего.
-	// Раньше она попадала в статус обоих: соперник видел чужой секрет.
-	if g.KnownShell != nil && g.KnownShellOwner == viewerID {
-		sb.WriteString(fmt.Sprintf("🔍 В стволе: %s\n", g.KnownShell.Name()))
-	}
-	if g.PhoneShell != nil && g.PhoneInfoOwner == viewerID {
-		sb.WriteString(g.phoneInfoText() + "\n")
-	}
-
-	logStart := len(g.Log) - 4
-	if logStart < 0 {
-		logStart = 0
-	}
-	if len(g.Log) > 0 {
-		sb.WriteString("━━━━━━━━━━━━━━━━━━━━\n")
-		sb.WriteString("📋 Лог\n")
-		for _, entry := range g.Log[logStart:] {
-			sb.WriteString(fmt.Sprintf("• %s\n", entry.Message))
+	// Лупа и телефон — приватная информация ТОЛЬКО смотревшего: каждый игрок
+	// видит в статусе собственную разведку и ничего чужого.
+	if viewer, ok := g.viewerPlayer(viewerID); ok {
+		if viewer.KnownShell != nil {
+			sb.WriteString(fmt.Sprintf("🔍 В стволе: %s\n", viewer.KnownShell.Name()))
 		}
+		sb.WriteString(viewer.knownPhoneText())
 	}
 
+	// Блока «📋 Лог» здесь больше нет: он повторял то, что игрок уже видел
+	// сообщениями о действиях, и занимал половину статуса. История по-прежнему
+	// копится в g.Log (её читают тесты и отладка) — просто не дублируется на
+	// экране. Единственное, что жило только в логе, — состав обоймы (выше,
+	// строкой «🔫 Заряжено») и пропуск хода по наручникам (теперь приходит
+	// сообщением вместе с выстрелом, см. nextTurn).
 	return sb.String()
 }
 

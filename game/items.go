@@ -1,7 +1,5 @@
 package game
 
-import "fmt"
-
 // ItemType — тип предмета
 type ItemType int
 
@@ -41,16 +39,16 @@ var itemDescriptions = map[ItemType]string{
 	ItemAdrenaline:      "Украсть предмет противника в свой инвентарь",
 }
 
-var itemCallbacks = map[ItemType]string{
-	ItemBeer:            "item_beer",
-	ItemCigarettes:      "item_cigarettes",
-	ItemMagnifyingGlass: "item_magnifying",
-	ItemHandsaw:         "item_handsaw",
-	ItemHandcuffs:       "item_handcuffs",
-	ItemBurnerPhone:     "item_phone",
-	ItemInverter:        "item_inverter",
-	ItemExpiredMedicine: "item_medicine",
-	ItemAdrenaline:      "item_adrenaline",
+var itemEmojis = map[ItemType]string{
+	ItemBeer:            "🍺",
+	ItemCigarettes:      "🚬",
+	ItemMagnifyingGlass: "🔍",
+	ItemHandsaw:         "🪚",
+	ItemHandcuffs:       "⛓️",
+	ItemBurnerPhone:     "📱",
+	ItemInverter:        "🔄",
+	ItemExpiredMedicine: "💊",
+	ItemAdrenaline:      "💉",
 }
 
 // Item — конкретный предмет в инвентаре
@@ -59,8 +57,19 @@ type Item struct {
 	ID   int // уникальный ID для идентификации
 }
 
+func (t ItemType) Name() string  { return itemNames[t] }
+func (t ItemType) Emoji() string { return itemEmojis[t] }
+
+// IsPrivate — предмет, РЕЗУЛЬТАТ которого видит только применивший (лупа,
+// телефон). В оригинале факт применения виден всегда: противник видит, что ты
+// взял лупу, но не то, что она показала. Поэтому приватность касается только
+// этих двух предметов, а не самого действия.
+func (t ItemType) IsPrivate() bool {
+	return t == ItemMagnifyingGlass || t == ItemBurnerPhone
+}
+
 func (i Item) Name() string {
-	return itemNames[i.Type]
+	return i.Type.Name()
 }
 
 func (i Item) Description() string {
@@ -68,22 +77,11 @@ func (i Item) Description() string {
 }
 
 func (i Item) Emoji() string {
-	emojis := map[ItemType]string{
-		ItemBeer:            "🍺",
-		ItemCigarettes:      "🚬",
-		ItemMagnifyingGlass: "🔍",
-		ItemHandsaw:         "🪚",
-		ItemHandcuffs:       "⛓️",
-		ItemBurnerPhone:     "📱",
-		ItemInverter:        "🔄",
-		ItemExpiredMedicine: "💊",
-		ItemAdrenaline:      "💉",
-	}
-	return emojis[i.Type]
+	return i.Type.Emoji()
 }
 
-func (i Item) CallbackData() string {
-	return fmt.Sprintf("%s_%d", itemCallbacks[i.Type], i.ID)
+func (i Item) IsPrivate() bool {
+	return i.Type.IsPrivate()
 }
 
 // AllItemTypes возвращает все типы предметов

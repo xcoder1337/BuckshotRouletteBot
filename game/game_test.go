@@ -442,10 +442,10 @@ func TestPhoneInfoNotLeakedToOpponent(t *testing.T) {
 		t.Fatalf("err: %v", err)
 	}
 
-	if !contains(g.GetStatusText(1), "📱 Патрон #") {
+	if !contains(g.GetStatusText(1), "📱 #") {
 		t.Fatalf("owner should see phone info:\n%s", g.GetStatusText(1))
 	}
-	if contains(g.GetStatusText(2), "📱 Патрон #") {
+	if contains(g.GetStatusText(2), "📱 #") {
 		t.Fatalf("opponent should NOT see phone info:\n%s", g.GetStatusText(2))
 	}
 }
@@ -533,8 +533,14 @@ func TestHandcuffsSkipTurn(t *testing.T) {
 	}
 
 	setMagazine(g, ShellBlank, ShellLive)
-	if _, err := g.Shoot(1, false); err != nil {
+	result, err := g.Shoot(1, false)
+	if err != nil {
 		t.Fatalf("err: %v", err)
+	}
+	// Пропуск хода обязан попадать в ОБЩЕЕ сообщение о выстреле: раньше он жил
+	// только в логе статуса, и игрок не понимал, почему ход остался у него же.
+	if !strings.Contains(result, "пропускает ход") {
+		t.Fatalf("skip note missing from shot result: %q", result)
 	}
 	// Ход должен был перейти к B, но B в наручниках — снова ход A
 	if g.CurrentTurn != Player1 {
@@ -597,23 +603,25 @@ func TestShellCountsPerRoundRange(t *testing.T) {
 	}
 }
 
-// Нейтральный счётчик патронов в статусе: показывает остаток из всех
-// заряженных, но НЕ раскрывает типы (🔴/🔵). Раскрытие типов в начале
-// раунда — это отдельный «намёк запомнить» из лога (как поддон на компе,
-// который показывают один раз и закрывают); сам счётчик обязан быть нейтральным.
-func TestShellCounterShowsRemaining(t *testing.T) {
+// Строка патронов в статусе: состав, который зарядили в этом раунде (публичный —
+// как патроны, выложенные на стол в оригинале), плюс нейтральный счётчик остатка,
+// за которым типа патрона НЕ видно.
+func TestShellLineShowsCompositionAndNeutralCounter(t *testing.T) {
 	g := newStartedTestGame()
 	g.RoundShells = 5
+	g.RoundLive, g.RoundBlank = 2, 3 // заряжено 2🔴 3🔵
 	g.Shotgun = &Shotgun{Magazine: []ShellType{ShellLive, ShellBlank, ShellLive}}
 
 	text := g.GetStatusText(1)
 	counter := counterLine(text)
-	if !contains(counter, "🔫 Патроны: 🔋🔋🔋🪫🪫  (3/5)") {
-		t.Fatalf("counter line wrong, got:\n%s", text)
+	if !contains(counter, "🔫 Заряжено 2🔴 3🔵 • осталось 🔋🔋🔋🪫🪫 (3/5)") {
+		t.Fatalf("shell line wrong, got:\n%s", text)
 	}
-	// Сама строка счётчика НЕ должна раскрывать типы патронов
-	if contains(counter, "🔴") || contains(counter, "🔵") {
-		t.Fatalf("shell types leaked into counter line, got:\n%s", counter)
+	// В части «осталось» типов быть не должно: за 🔋 не видно, боевой он или
+	// холостой, — иначе исчезает вся игра в подсчёт выстрелов.
+	rest := counter[strings.Index(counter, "осталось"):]
+	if contains(rest, "🔴") || contains(rest, "🔵") {
+		t.Fatalf("shell types leaked into remaining counter, got:\n%s", counter)
 	}
 
 	// После выстрела остаток уменьшается
@@ -625,14 +633,33 @@ func TestShellCounterShowsRemaining(t *testing.T) {
 	}
 }
 
-// counterLine — строка «🔫 Патроны: ...» из статуса
+// counterLine — строка «🔫 Заряжено ...» из статуса
 func counterLine(text string) string {
 	for _, line := range strings.Split(text, "\n") {
-		if strings.Contains(line, "🔫 Патроны:") {
+		if strings.Contains(line, "🔫 Заряжено") {
 			return line
 		}
 	}
 	return ""
+}
+
+// Статус больше не дублирует события списком «📋 Лог»: то, что игрок уже видел
+// сообщениями о действиях, не повторяется под статусом. Но то, что жило ТОЛЬКО
+// в логе — состав заряженной обоймы, — обязано остаться видимым.
+func TestStatusHasNoLogBlock(t *testing.T) {
+	g := newStartedTestGame()
+	setItems(g, Player1, ItemBeer, ItemCigarettes)
+	if _, err := g.UseItem(1, 1); err != nil {
+		t.Fatalf("err: %v", err)
+	}
+
+	text := g.GetStatusText(1)
+	if contains(text, "📋 Лог") {
+		t.Fatalf("log block must be gone from status, got:\n%s", text)
+	}
+	if counterLine(text) == "" {
+		t.Fatalf("shell composition line missing, got:\n%s", text)
+	}
 }
 
 // Игра проходит через несколько раундов: 1 → 2 → 3, жизни растут
@@ -736,6 +763,19 @@ func contains(s, sub string) bool {
 	return false
 }
 
+// phoneReveal — единственная раскрытая телефоном позиция (в тестах их по одной).
+func phoneReveal(t *testing.T, g *Game, p PlayerID) (int, ShellType) {
+	t.Helper()
+	known := g.Players[p].PhoneKnown
+	if len(known) != 1 {
+		t.Fatalf("phone known = %v, want exactly 1 position", known)
+	}
+	for pos, shell := range known {
+		return pos, shell
+	}
+	return 0, ShellBlank
+}
+
 // Пиво извлекает текущий патрон: знание лупы о нём сгорает. Раньше KnownShell
 // «зависал» и игрок действовал по информации о патроне, которого уже нет.
 func TestBeerClearsKnownShell(t *testing.T) {
@@ -746,13 +786,13 @@ func TestBeerClearsKnownShell(t *testing.T) {
 	if _, err := g.UseItem(1, 1); err != nil {
 		t.Fatalf("magnifier: %v", err)
 	}
-	if g.KnownShell == nil {
-		t.Fatal("magnifier should set KnownShell")
+	if g.Players[0].KnownShell == nil {
+		t.Fatal("magnifier should set the viewer's KnownShell")
 	}
 	if _, err := g.UseItem(1, 2); err != nil {
 		t.Fatalf("beer: %v", err)
 	}
-	if g.KnownShell != nil {
+	if g.Players[0].KnownShell != nil {
 		t.Fatal("beer must clear KnownShell — the observed shell was extracted")
 	}
 }
@@ -767,19 +807,139 @@ func TestPhoneShiftsAfterBeer(t *testing.T) {
 	if _, err := g.UseItem(1, 1); err != nil {
 		t.Fatalf("phone: %v", err)
 	}
-	if g.PhoneShell == nil || g.PhoneShellPos <= 1 {
-		t.Fatalf("phone should reveal a future shell, got pos %d", g.PhoneShellPos)
+	before, _ := phoneReveal(t, g, Player1)
+	if before <= 1 {
+		t.Fatalf("phone should reveal a future shell, got pos %d", before)
 	}
-	before := g.PhoneShellPos
 
 	if _, err := g.UseItem(1, 2); err != nil {
 		t.Fatalf("beer: %v", err)
 	}
-	if g.PhoneShell == nil {
-		t.Fatal("phone info should survive beer")
+	after, _ := phoneReveal(t, g, Player1)
+	if after != before-1 {
+		t.Fatalf("phone position = %d, want %d (shifted by beer)", after, before-1)
 	}
-	if g.PhoneShellPos != before-1 {
-		t.Fatalf("phone position = %d, want %d (shifted by beer)", g.PhoneShellPos, before-1)
+}
+
+// РЕГРЕССИЯ (баг из реальной игры): телефон, использованный дважды подряд —
+// своим и украденным через 💉 адреналин — показывал одну и ту же строку
+// «📱 Патрон #2: 🔵 Холостой» два раза. Знание хранилось в одном слоте на игру,
+// а позиция считалась как 1+rand.Intn(len-1) → при двух патронах всегда #2.
+func TestPhoneDoesNotRepeatRevealWhenStolen(t *testing.T) {
+	g := newStartedTestGame()
+	setItems(g, Player1, ItemBurnerPhone, ItemAdrenaline) // ID 1, 2
+	setItems(g, Player2, ItemBurnerPhone)                 // ID 3
+	setMagazine(g, ShellLive, ShellBlank)
+
+	first, err := g.UseItem(1, 1)
+	if err != nil {
+		t.Fatalf("own phone: %v", err)
+	}
+	if !contains(first, "Патрон #2") {
+		t.Fatalf("first phone = %q, want reveal of #2 (the only future shell)", first)
+	}
+
+	// Крадём телефон противника через адреналин и используем его.
+	if _, err := g.UseItem(1, 2); err != nil {
+		t.Fatalf("adrenaline: %v", err)
+	}
+	if g.Phase != PhaseAdrenaline {
+		t.Fatalf("phase = %v, want PhaseAdrenaline", g.Phase)
+	}
+	if _, err := g.UseItem(1, 3); err != nil {
+		t.Fatalf("steal phone: %v", err)
+	}
+	second, err := g.UseItem(1, 3)
+	if err != nil {
+		t.Fatalf("stolen phone: %v", err)
+	}
+	if !contains(second, "Патрон #1") {
+		t.Fatalf("stolen phone = %q, want the still-unknown #1, not a repeat of #2", second)
+	}
+}
+
+// Телефон никогда не повторяет уже раскрытую позицию, пока в обойме есть
+// неизвестные. Раньше второй вызов возвращал ту же строку.
+func TestPhoneNeverRepeatsWhileUnknownRemain(t *testing.T) {
+	g := newStartedTestGame()
+	setItems(g, Player1, ItemBurnerPhone, ItemBurnerPhone) // ID 1, 2
+	setMagazine(g, ShellLive, ShellBlank, ShellLive, ShellBlank)
+
+	if _, err := g.UseItem(1, 1); err != nil {
+		t.Fatalf("first phone: %v", err)
+	}
+	firstPos, _ := phoneReveal(t, g, Player1)
+
+	if _, err := g.UseItem(1, 2); err != nil {
+		t.Fatalf("second phone: %v", err)
+	}
+	if len(g.Players[0].PhoneKnown) != 2 {
+		t.Fatalf("phone known = %v, want 2 revealed positions", g.Players[0].PhoneKnown)
+	}
+	if _, ok := g.Players[0].PhoneKnown[firstPos]; !ok {
+		t.Fatal("first reveal must be remembered")
+	}
+	for pos := range g.Players[0].PhoneKnown {
+		if pos == firstPos {
+			continue
+		}
+		if pos == 0 {
+			t.Fatal("position 0 stored — numbering must be 1-based")
+		}
+	}
+}
+
+// Разведка персональна: лупа/телефон одного игрока не видны второму и не
+// попадают в его статус. Раньше знание лежало в Game и утекало противнику.
+func TestShellKnowledgeIsPerPlayer(t *testing.T) {
+	g := newStartedTestGame()
+	setItems(g, Player1, ItemMagnifyingGlass, ItemBurnerPhone) // ID 1, 2
+	setMagazine(g, ShellLive, ShellBlank, ShellLive)
+
+	if _, err := g.UseItem(1, 1); err != nil {
+		t.Fatalf("magnifier: %v", err)
+	}
+	if _, err := g.UseItem(1, 2); err != nil {
+		t.Fatalf("phone: %v", err)
+	}
+
+	if g.Players[1].KnownShell != nil {
+		t.Fatal("opponent must not gain the magnifier result")
+	}
+	if len(g.Players[1].PhoneKnown) != 0 {
+		t.Fatalf("opponent must not gain the phone result, got %v", g.Players[1].PhoneKnown)
+	}
+
+	if own := g.GetStatusText(1); !contains(own, "🔍 В стволе") || !contains(own, "📱 #") {
+		t.Fatalf("own status must show own recon, got:\n%s", own)
+	}
+	if other := g.GetStatusText(2); contains(other, "🔍 В стволе") || contains(other, "📱 #") {
+		t.Fatalf("opponent status must not leak recon, got:\n%s", other)
+	}
+}
+
+// Знание сдвигается, а не сгорает: после выстрела раскрытые позиции
+// приближаются к стволу, а знание о сгоревшем патроне исчезает.
+func TestKnowledgeShiftsAfterShot(t *testing.T) {
+	g := newStartedTestGame()
+	setItems(g, Player1, ItemBurnerPhone) // ID 1
+	setMagazine(g, ShellBlank, ShellLive, ShellBlank)
+
+	if _, err := g.UseItem(1, 1); err != nil {
+		t.Fatalf("phone: %v", err)
+	}
+	pos, shell := phoneReveal(t, g, Player1)
+	if pos == 1 {
+		t.Fatal("phone should have revealed a future shell")
+	}
+
+	// Холостой в себя: ход остаётся у того же игрока, патрон сгорает.
+	if _, err := g.Shoot(1, true); err != nil {
+		t.Fatalf("shoot self: %v", err)
+	}
+	after, afterShell := phoneReveal(t, g, Player1)
+	if after != pos-1 || afterShell != shell {
+		t.Fatalf("phone = #%d %v, want #%d %v after the shot", after, afterShell, pos-1, shell)
 	}
 }
 

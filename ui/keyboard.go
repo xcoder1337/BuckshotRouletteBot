@@ -88,8 +88,10 @@ func GameActionKeyboard(g *game.Game) tgbotapi.InlineKeyboardMarkup {
 	if len(currentPlayer.Items) > 0 {
 		var itemRow []tgbotapi.InlineKeyboardButton
 		for i, item := range currentPlayer.Items {
+			// item.Name() уже содержит эмодзи («🍺 Пиво») — добавлять Emoji()
+			// нельзя, иначе на кнопке получается «🍺 🍺 Пиво».
 			btn := tgbotapi.NewInlineKeyboardButtonData(
-				item.Emoji()+" "+item.Name(),
+				item.Name(),
 				fmt.Sprintf("use_item_%d", item.ID),
 			)
 			itemRow = append(itemRow, btn)
@@ -126,8 +128,9 @@ func AdrenalineKeyboard(g *game.Game) tgbotapi.InlineKeyboardMarkup {
 
 	var itemRow []tgbotapi.InlineKeyboardButton
 	for i, item := range stealable {
+		// Как и в GameActionKeyboard: эмодзи уже внутри item.Name().
 		btn := tgbotapi.NewInlineKeyboardButtonData(
-			item.Emoji()+" "+item.Name(),
+			item.Name(),
 			fmt.Sprintf("steal_item_%d", item.ID),
 		)
 		itemRow = append(itemRow, btn)

@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"strings"
 	"testing"
 
 	"buckshot-roulette-bot/game"
@@ -38,6 +39,52 @@ func hasCallback(cbs []string, target string) bool {
 		}
 	}
 	return false
+}
+
+// collectLabels — тексты кнопок (для проверки подписей).
+func collectLabels(kb tgbotapi.InlineKeyboardMarkup) []string {
+	var out []string
+	for _, row := range kb.InlineKeyboard {
+		for _, btn := range row {
+			out = append(out, btn.Text)
+		}
+	}
+	return out
+}
+
+func hasLabel(labels []string, target string) bool {
+	for _, l := range labels {
+		if l == target {
+			return true
+		}
+	}
+	return false
+}
+
+// Подписи кнопок предметов: «🍺 Пиво», а не «🍺 🍺 Пиво». item.Name() уже
+// содержит эмодзи, и склейка Emoji()+" "+Name() давала удвоенное эмодзи —
+// реальный баг, который тут и ловится.
+func TestItemButtonLabels(t *testing.T) {
+	g := gameForKeyboard()
+	own := collectLabels(GameActionKeyboard(g))
+	steal := collectLabels(AdrenalineKeyboard(g))
+
+	if !hasLabel(own, "🍺 Пиво") || !hasLabel(own, "🪚 Ножовка") {
+		t.Fatalf("подписи своих предметов неверны: %v", own)
+	}
+	if !hasLabel(steal, "🚬 Сигареты") {
+		t.Fatalf("подписи меню кражи неверны: %v", steal)
+	}
+
+	for _, labels := range [][]string{own, steal} {
+		for _, l := range labels {
+			for _, it := range game.AllItemTypes() {
+				if strings.Contains(l, it.Emoji()+" "+it.Emoji()) {
+					t.Fatalf("эмодзи продублирован в подписи кнопки: %q", l)
+				}
+			}
+		}
+	}
 }
 
 // Клавиатура действий показывает ТОЛЬКО свои предметы + выстрелы

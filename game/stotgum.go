@@ -127,16 +127,6 @@ func (s *Shotgun) BlankCount() int {
 	return count
 }
 
-// GetRandomShellInfo — для телефона, возвращает позицию и тип
-func (s *Shotgun) GetRandomShellInfo() (int, ShellType) {
-	if len(s.Magazine) <= 1 {
-		return 0, s.CurrentShell()
-	}
-	// Выбираем случайную позицию (не первую, чтобы было интереснее)
-	pos := 1 + rand.Intn(len(s.Magazine)-1)
-	return pos + 1, s.Magazine[pos] // +1 для человекочитаемой нумерации
-}
-
 // Damage — урон текущего выстрела
 func (s *Shotgun) Damage() int {
 	if s.SawedOff {

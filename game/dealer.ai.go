@@ -10,16 +10,26 @@ func (ai *DealerAI) DecideAction(g *Game) (useItem bool, itemType ItemType, shoo
 	dealer := g.CurrentPlayer()
 	player := g.OpponentPlayer()
 
+	// Дилер играет только по СВОЕЙ разведке. Раньше он читал общий g.KnownShell,
+	// куда писал и игрок: ИИ видел чужую лупу и играл безошибочно.
+	known := dealer.KnownShell
+	if known == nil {
+		if shell, ok := dealer.PhoneKnown[1]; ok {
+			// Телефон раскрыл патрон в стволе — для дилера это то же знание.
+			known = &shell
+		}
+	}
+
 	// Приоритет использования предметов
 	for _, item := range dealer.Items {
 		switch item.Type {
 		case ItemMagnifyingGlass:
-			if g.KnownShell == nil {
+			if known == nil {
 				return true, ItemMagnifyingGlass, false
 			}
 
 		case ItemBurnerPhone:
-			if g.KnownShell == nil && len(g.Shotgun.Magazine) > 2 {
+			if known == nil && len(dealer.PhoneKnown) == 0 && len(g.Shotgun.Magazine) > 2 {
 				return true, ItemBurnerPhone, false
 			}
 
@@ -34,17 +44,17 @@ func (ai *DealerAI) DecideAction(g *Game) (useItem bool, itemType ItemType, shoo
 			}
 
 		case ItemHandsaw:
-			if !g.SawedOff && g.KnownShell != nil && *g.KnownShell == ShellLive {
+			if !g.SawedOff && known != nil && *known == ShellLive {
 				return true, ItemHandsaw, false
 			}
 
 		case ItemBeer:
-			if g.KnownShell != nil && *g.KnownShell == ShellBlank {
+			if known != nil && *known == ShellBlank {
 				return true, ItemBeer, false
 			}
 
 		case ItemInverter:
-			if g.KnownShell != nil && *g.KnownShell == ShellBlank {
+			if known != nil && *known == ShellBlank {
 				return true, ItemInverter, false
 			}
 
@@ -56,8 +66,8 @@ func (ai *DealerAI) DecideAction(g *Game) (useItem bool, itemType ItemType, shoo
 	}
 
 	// Решение о выстреле
-	if g.KnownShell != nil {
-		if *g.KnownShell == ShellBlank {
+	if known != nil {
+		if *known == ShellBlank {
 			// Известно что холостой — в себя
 			return false, 0, true
 		}
