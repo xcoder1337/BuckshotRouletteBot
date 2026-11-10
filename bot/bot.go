@@ -16,15 +16,15 @@ import (
 	"buckshot-roulette-bot/game"
 	"buckshot-roulette-bot/storage"
 	"buckshot-roulette-bot/ui"
+	"buckshot-roulette-bot/version"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"golang.org/x/net/proxy"
 )
 
-// botVersion — версия бота (не игры!). Это ПЕРВАЯ стабильная версия (major = 1),
-// число правок — 17 итераций «почини/доделай + рестарт», которые мы с тобой прошли.
-// Пользователям показываем только саму версию, без счётчика итераций.
-const botVersion = "1.17"
+// Номер сборки живёт в пакете version (version.Bot) — он же попадает в шапку
+// экрана игры, чтобы после обновления на телефоне было видно, какая сборка
+// запущена на самом деле.
 
 // Bot — телеграм бот
 type Bot struct {
@@ -89,7 +89,7 @@ func New(token string) (*Bot, error) {
 
 	api.Debug = false
 	log.Printf("Authorized on account %s", api.Self.UserName)
-	log.Printf("🏷️ Buckshot Roulette Bot v%s", botVersion)
+	log.Printf("🏷️ Buckshot Roulette Bot v%s", version.Bot)
 
 	b := &Bot{
 		api:              api,
@@ -267,7 +267,7 @@ func (b *Bot) sendMainMenu(msg *tgbotapi.Message) {
 
 🔫 Заряжай\. Стреляй\. Выживай\.
 
-Выбери действие:`, escapeMarkdown(botVersion))
+Выбери действие:`, escapeMarkdown(version.Bot))
 
 	reply := tgbotapi.NewMessage(msg.Chat.ID, text)
 	reply.ParseMode = "MarkdownV2"
@@ -416,7 +416,7 @@ func (b *Bot) handleRules(msg *tgbotapi.Message) {
 
 // handleVersion — /version: версия сборки.
 func (b *Bot) handleVersion(msg *tgbotapi.Message) {
-	text := fmt.Sprintf("🏷️ *Buckshot Roulette Bot*\nСборка `%s`\n\nСтабильная версия по правилам оригинала\\.", escapeMarkdown(botVersion))
+	text := fmt.Sprintf("🏷️ *Buckshot Roulette Bot*\nСборка `%s`\n\nСтабильная версия по правилам оригинала\\.", escapeMarkdown(version.Bot))
 	reply := tgbotapi.NewMessage(msg.Chat.ID, text)
 	reply.ParseMode = "MarkdownV2"
 	b.api.Send(reply)

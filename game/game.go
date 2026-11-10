@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"buckshot-roulette-bot/version"
 )
 
 // maxLives — максимум жизней (как в оригинале: старт 2, +1 за раунд, кап 5)
@@ -826,7 +828,9 @@ func (g *Game) GetStatusText(viewerID int64) string {
 
 	var sb strings.Builder
 
-	sb.WriteString("🎯 BUCKSHOT ROULETTE\n")
+	// Версия в шапке — не украшение: после обновления на телефоне это первый
+	// признак, что работает новая сборка, а не старая из памяти процесса.
+	sb.WriteString(fmt.Sprintf("🎯 BUCKSHOT ROULETTE v%s\n", version.Bot))
 	sb.WriteString("━━━━━━━━━━━━━━━━━━━━\n")
 
 	// Состав, который БЫЛ заряжен в этом раунде, виден всегда (строка
